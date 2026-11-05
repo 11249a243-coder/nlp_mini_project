@@ -76,6 +76,10 @@ st.markdown("""
 
 @st.cache_resource
 def load_embedding_model():
+    import torch
+
+    torch.set_num_threads(1)
+
     return SentenceTransformer(
         "sentence-transformers/all-MiniLM-L6-v2",
         device="cpu"
