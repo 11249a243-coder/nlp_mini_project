@@ -2,23 +2,24 @@
 import os
 import io
 import csv
+import re
 import hashlib
 from pathlib import Path
 
-import numpy as np
 import streamlit as st
 import pymupdf
 from docx import Document
 from pptx import Presentation
 from openpyxl import load_workbook
-from sentence_transformers import SentenceTransformer
 from openai import OpenAI
+
 
 st.set_page_config(
     page_title="SCSVMV AcademicQuery AI",
     page_icon="🎓",
     layout="wide",
 )
+
 
 # --------------------------- STYLING ---------------------------
 
@@ -72,19 +73,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --------------------------- AI MODEL ---------------------------
-
-@st.cache_resource
-def load_embedding_model():
-    import torch
-
-    torch.set_num_threads(1)
-
-    return SentenceTransformer(
-        "sentence-transformers/all-MiniLM-L6-v2",
-        device="cpu"
-    )
-
+# --------------------------- OPENAI CLIENT ---------------------------
 
 def get_openai_client():
 
@@ -217,30 +206,32 @@ def extract_xlsx(data):
 
     pieces = []
 
-    for sheet in workbook.worksheets:
+    try:
+        for sheet in workbook.worksheets:
 
-        rows = []
+            rows = []
 
-        for row in sheet.iter_rows(values_only=True):
+            for row in sheet.iter_rows(values_only=True):
 
-            values = [
-                str(value)
-                for value in row
-                if value is not None
-            ]
+                values = [
+                    str(value)
+                    for value in row
+                    if value is not None
+                ]
 
-            if values:
-                rows.append(" | ".join(values))
+                if values:
+                    rows.append(" | ".join(values))
 
-        if rows:
+            if rows:
 
-            pieces.append((
-                None,
-                f"Sheet: {sheet.title}\n"
-                + "\n".join(rows)
-            ))
+                pieces.append((
+                    None,
+                    f"Sheet: {sheet.title}\n"
+                    + "\n".join(rows)
+                ))
 
-    workbook.close()
+    finally:
+        workbook.close()
 
     return pieces
 
@@ -363,8 +354,6 @@ def initialize_session():
 
 def process_documents(files):
 
-    model = load_embedding_model()
-
     new_records = []
 
     processed_count = 0
@@ -374,6 +363,8 @@ def process_documents(files):
         0,
         text="Starting document processing..."
     )
+
+    total_files = len(files)
 
     for index, uploaded_file in enumerate(files):
 
@@ -388,7 +379,7 @@ def process_documents(files):
             skipped_count += 1
 
             progress.progress(
-                (index + 1) / len(files),
+                (index + 1) / total_files,
                 text=f"Already processed: {uploaded_file.name}"
             )
 
@@ -436,35 +427,11 @@ def process_documents(files):
             )
 
         progress.progress(
-            (index + 1) / len(files),
-            text=f"Processed {index + 1} of {len(files)} files"
+            (index + 1) / total_files,
+            text=f"Processed {index + 1} of {total_files} files"
         )
 
     if new_records:
-
-        texts = [
-            record["text"]
-            for record in new_records
-        ]
-
-        with st.spinner(
-            "Creating searchable document representations..."
-        ):
-
-            vectors = model.encode(
-                texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                batch_size=32,
-            )
-
-        for record, vector in zip(
-            new_records,
-            vectors
-        ):
-
-            record["embedding"] = vector
 
         st.session_state.records.extend(
             new_records
@@ -475,7 +442,44 @@ def process_documents(files):
     return processed_count, skipped_count
 
 
-# --------------------------- SEMANTIC SEARCH ---------------------------
+# --------------------------- LIGHTWEIGHT KEYWORD SEARCH ---------------------------
+
+STOP_WORDS = {
+    "the", "is", "are", "was", "were", "am",
+    "a", "an", "and", "or", "but", "if",
+    "in", "on", "at", "to", "for", "of",
+    "from", "by", "with", "about", "as",
+    "it", "its", "this", "that", "these",
+    "those", "be", "been", "being",
+    "do", "does", "did", "has", "have",
+    "had", "can", "could", "would", "should",
+    "will", "shall", "may", "might",
+    "i", "we", "you", "he", "she", "they",
+    "them", "his", "her", "our", "your",
+    "my", "their", "me", "us",
+    "what", "which", "who", "whom",
+    "when", "where", "why", "how",
+    "please", "tell", "explain", "give",
+    "show", "find", "know", "want",
+    "need", "there", "here", "also"
+}
+
+
+def tokenize(text):
+
+    words = re.findall(
+        r"[a-zA-Z0-9]+",
+        text.lower()
+    )
+
+    return {
+        word
+        for word in words
+        if len(word) > 2 and word not in STOP_WORDS
+    }
+
+
+# --------------------------- RETRIEVE DOCUMENT CONTEXT ---------------------------
 
 def retrieve_context(
     question,
@@ -487,24 +491,27 @@ def retrieve_context(
     if not records:
         return []
 
-    model = load_embedding_model()
+    query_terms = tokenize(question)
 
-    query_vector = model.encode(
-        [question],
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )[0]
+    if not query_terms:
+        return []
 
     scored = []
 
     for record in records:
 
-        score = float(
-            np.dot(
-                query_vector,
-                record["embedding"]
-            )
+        record_terms = tokenize(
+            record["text"]
         )
+
+        overlap = query_terms.intersection(
+            record_terms
+        )
+
+        if not overlap:
+            continue
+
+        score = len(overlap) / len(query_terms)
 
         scored.append(
             (score, record)
@@ -997,8 +1004,8 @@ else:
     st.write(
         "AcademicQuery AI is a document-assisted "
         "university question-answering prototype "
-        "built with Streamlit, semantic retrieval "
-        "and an AI language model."
+        "built with Streamlit, lightweight keyword "
+        "retrieval and an AI language model."
     )
 
     st.subheader("Supported document types")
