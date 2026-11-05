@@ -1011,6 +1011,3 @@ else:
         "They are not automatically shared with "
         "other devices or permanently stored."
     )
-    @app.route("/")
-def home():
-    return render_template("index.html")
